@@ -201,7 +201,7 @@ def sync_race_data_manual(db: Session, gp_id: int):
             dnf_list_str = ", ".join(dnf_drivers)
             events_to_add.append(RaceEvent(
                 race_result_id=new_race_result.id,
-                event_type="DNF_LIST", # Nuevo tipo de evento informativo
+                event_type="DNF_DRIVER", # Nuevo tipo de evento informativo
                 value=dnf_list_str
             ))
         

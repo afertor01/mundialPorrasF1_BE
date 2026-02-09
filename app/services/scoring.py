@@ -46,12 +46,30 @@ def build_event_map(events):
     }
 
 def get_correct_events(prediction_events, race_events):
+    """
+    Compara los eventos predichos con los reales.
+    Maneja lógica especial para DNF_DRIVER (lista de valores).
+    """
     real_events = build_event_map(race_events)
     correct = []
 
     for pe in prediction_events:
+        # Verificamos si el tipo de evento existe en los resultados reales
         if pe.event_type in real_events:
-            if str(pe.value) == str(real_events[pe.event_type]):
+            real_val = str(real_events[pe.event_type])
+            pred_val = str(pe.value)
+
+            # --- CAMBIO IMPORTANTE AQUÍ ---
+            if pe.event_type == "DNF_DRIVER":
+                # La realidad es una lista "SAI, VER, HAM" y la predicción es "SAI"
+                # Convertimos la lista real en un set para buscar fácil
+                real_dnf_list = [x.strip() for x in real_val.split(",")]
+                
+                if pred_val in real_dnf_list:
+                    correct.append(pe.event_type)
+            
+            # --- LÓGICA ESTÁNDAR PARA EL RESTO ---
+            elif pred_val == real_val:
                 correct.append(pe.event_type)
 
     return correct

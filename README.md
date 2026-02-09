@@ -195,4 +195,4 @@ The API returns standard HTTP status codes:
 - 401: Unauthorized/invalid token
 - 403: Forbidden/insufficient permissions
 - 404: Resource not found
-- 500: Server error# mundialPorrasF1_BE
+- 500: Server error

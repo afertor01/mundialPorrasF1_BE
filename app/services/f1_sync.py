@@ -10,6 +10,7 @@ from app.db.models.race_result import RaceResult
 from app.db.models.race_position import RacePosition
 from app.db.models.race_event import RaceEvent
 from app.db.models.driver import Driver
+from app.db.models.season import Season
 from app.services.achievements_service import evaluate_race_achievements
 
 # Configuración caché
@@ -24,8 +25,54 @@ DB_TO_API_MAP = {
     "Gran Premio de Bahrein": "Bahrain",
     "GP Bahrain": "Bahrain",
     "Gran Premio de Arabia Saudí": "Saudi Arabia",
-    # ... resto de tus mapeos
+    "Saudi Arabian Grand Prix": "Saudi Arabia",
+    "Australian Grand Prix": "Australia",
+    "Japanese Grand Prix": "Japan",
+    "Chinese Grand Prix": "China",
+    "Miami Grand Prix": "Miami",
+    "Emilia Romagna Grand Prix": "Imola",
+    "Monaco Grand Prix": "Monaco",
+    "Canadian Grand Prix": "Canada",
+    "Spanish Grand Prix": "Spain",
+    "Austrian Grand Prix": "Austria",
+    "British Grand Prix": "Great Britain",
+    "Hungarian Grand Prix": "Hungary",
+    "Belgian Grand Prix": "Belgium",
+    "Dutch Grand Prix": "Netherlands",
+    "Italian Grand Prix": "Italy",
+    "Azerbaijan Grand Prix": "Azerbaijan",
+    "Singapore Grand Prix": "Singapore",
+    "United States Grand Prix": "United States",
+    "Mexico City Grand Prix": "Mexico",
+    "São Paulo Grand Prix": "Brazil",
+    "Las Vegas Grand Prix": "Las Vegas",
+    "Qatar Grand Prix": "Qatar",
+    "Abu Dhabi Grand Prix": "Abu Dhabi"
 }
+
+# --- FUNCIÓN 1: Sincronizar QUALY (La que hicimos antes) ---
+def sync_qualy_results(gp_id: int, db: Session):
+    gp = db.query(GrandPrix).filter(GrandPrix.id == gp_id).first()
+    if not gp:
+        return {"success": False, "error": "GP no encontrado"}
+
+    season = db.query(Season).filter(Season.id == gp.season_id).first()
+    
+    try:
+        api_name = DB_TO_API_MAP.get(gp.name, gp.name)
+        session = fastf1.get_session(season.year, api_name, 'Q')
+        session.load()
+        
+        results = session.results
+        qualy_order = results['Abbreviation'].tolist()
+        
+        gp.qualy_results = qualy_order
+        db.commit()
+        
+        return {"success": True, "data": qualy_order}
+    except Exception as e:
+        print(f"Error syncing qualy: {e}")
+        return {"success": False, "error": str(e)}
 
 def sync_race_data_manual(db: Session, gp_id: int):
     logs = []

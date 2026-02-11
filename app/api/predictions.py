@@ -131,6 +131,7 @@ def get_all_predictions_for_gp(
         results.append({
             "username": p.user.username,
             "points": p.points,
+            "base_points": p.points_base,
             "multiplier": p.multiplier,
             "positions": {pos.position: pos.driver_name for pos in p.positions},
             "events": {evt.event_type: evt.value for evt in p.events}

@@ -27,7 +27,7 @@ from app.schemas.season import SeasonCreate
 from typing import Optional
 from pydantic import BaseModel
 from app.services.scoring import calculate_prediction_score
-from app.services.f1_sync import sync_race_data_manual
+from app.services.f1_sync import sync_race_data_manual, sync_qualy_results
 from app.core.deps import require_admin
 from app.core.security import hash_password
 
@@ -544,6 +544,20 @@ def sync_gp_data(gp_id: int, current_user = Depends(require_admin)):
         "success": success,
         "logs": logs
     }
+
+@router.post("/gps/{gp_id}/sync-qualy")
+def sync_gp_qualy(gp_id: int, current_user = Depends(require_admin)):
+    """
+    Sincroniza los resultados de la CLASIFICACIÓN (Sábado) usando FastF1.
+    """
+    db = SessionLocal()
+    result = sync_qualy_results(gp_id, db)
+    db.close()
+    
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result.get("error", "Error syncing qualy"))
+    
+    return result
 
 # -----------------------
 # Gestión de Escuderías (Teams)

@@ -104,8 +104,19 @@ def check_event_achievements(db: Session, user_id: int, gp: GrandPrix) -> Set[st
     hit_sc = user_evts.get("SAFETY_CAR") == real_evts.get("SAFETY_CAR")
     hit_fl = user_evts.get("FASTEST_LAP") == real_evts.get("FASTEST_LAP")
     hit_dnf = int(user_evts.get("DNFS", 0)) == int(real_evts.get("DNFS", 0))
+    
+    # Comprobación del DNF Driver
+    user_dnf_driver_pred = user_evts.get("DNF_DRIVER")
+    real_dnf_drivers_str = real_evts.get("DNF_DRIVER") # Puede ser una lista "VER,PER"
+    real_dnfs_count = int(real_evts.get("DNFS", 0))
+    hit_dnf_driver = False
+    if hit_dnf and real_dnfs_count == 0:
+        hit_dnf_driver = True
+    elif real_dnfs_count > 0 and user_dnf_driver_pred and real_dnf_drivers_str:
+        hit_dnf_driver = user_dnf_driver_pred in real_dnf_drivers_str.split(',')
+
     hit_pole = user_evts.get("POLE_POSITION") == real_evts.get("POLE_POSITION")
-    events_hit_count = sum([hit_sc, hit_fl, hit_dnf])
+    events_hit_count = sum([hit_sc, hit_fl, hit_dnf, hit_dnf_driver])
 
     # Logros
     if points > 0: unlocks.add("event_first")
@@ -121,8 +132,8 @@ def check_event_achievements(db: Session, user_id: int, gp: GrandPrix) -> Set[st
     user_top10 = {user_pos.get(i) for i in range(1,11) if user_pos.get(i)}
     if len(real_top10) == 10 and real_top10 == user_top10: unlocks.add("event_oracle")
 
-    if events_hit_count == 3: unlocks.add("event_mc")
-    if exact_hits == 10 and events_hit_count == 3: unlocks.add("event_god")
+    if events_hit_count == 4: unlocks.add("event_mc")
+    if exact_hits == 10 and events_hit_count == 4: unlocks.add("event_god")
     
     hit_p1 = user_pos.get(1) == real_pos.get(1)
     if hit_pole and hit_fl and hit_p1: unlocks.add("event_grand_chelem")
@@ -249,15 +260,8 @@ def grant_achievements(
 
         already_has = False
         
-        # Lógica de Duplicados
-        if ach.type == AchievementType.SEASON:
-            # SEASON: Puede tenerlo repetido si es de DIFERENTE temporada
-            already_has = any(r.achievement_id == ach.id and r.season_id == season_id for r in existing_rows)
-        else:
-            # CAREER/EVENT: Normalmente solo uno por vida (o según tu lógica de negocio)
-            # Si quieres permitir múltiples 'event_maldonado', quita este else.
-            # Aquí asumimos "Unique per user" para career/event.
-            already_has = any(r.achievement_id == ach.id for r in existing_rows)
+        # Lógica de Duplicados: Un logro solo se otorga una vez en la vida.
+        already_has = any(r.achievement_id == ach.id for r in existing_rows)
 
         if not already_has:
             print(f"🏆 DESBLOQUEADO: {slug}")

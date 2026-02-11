@@ -5,3 +5,5 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
+*Zone.Identifier
+cache/

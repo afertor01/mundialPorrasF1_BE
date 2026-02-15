@@ -43,3 +43,23 @@ class UserStats(Base):
     current_season_points = Column(Float, default=0.0)
     
     user = relationship("User", backref="stats")
+
+class UserGpStats(Base):
+    """
+    Guarda el desglose de lo que un usuario consiguió en un GP específico.
+    Sirve para poder 'revertir' estadísticas si se modifica el resultado del GP
+    y para evitar recálculos masivos.
+    """
+    __tablename__ = "user_gp_stats"
+
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    gp_id = Column(Integer, ForeignKey("grand_prix.id"), primary_key=True)
+
+    # Métricas que se suman al UserStats global
+    points = Column(Integer, default=0)
+    exact_positions = Column(Integer, default=0)
+    exact_podium_hit = Column(Boolean, default=False) # 1, 2, 3 exactos
+    fastest_lap_hit = Column(Boolean, default=False)
+    safety_car_hit = Column(Boolean, default=False)
+    dnf_count_hit = Column(Boolean, default=False)
+    dnf_driver_hit = Column(Boolean, default=False)

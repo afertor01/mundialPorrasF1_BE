@@ -27,6 +27,7 @@ from app.schemas.season import SeasonCreate
 from typing import Optional
 from pydantic import BaseModel
 from app.services.scoring import calculate_prediction_score
+from app.services.achievements_service import evaluate_race_achievements, rebuild_all_achievements
 from app.services.f1_sync import sync_race_data_manual, sync_qualy_results
 from app.core.deps import require_admin
 from app.core.security import hash_password
@@ -439,6 +440,13 @@ def upsert_race_result(
     if not gp:
         db.close()
         raise HTTPException(404, "GP no encontrado")
+    
+    if gp.race_datetime > datetime.utcnow():
+        db.close()
+        raise HTTPException(
+            status_code=400, 
+            detail="✋ No corras tanto. No puedes introducir resultados de una carrera futura."
+    )
 
     # Comprobar si ya hay resultado
     result = db.query(RaceResult).filter(RaceResult.gp_id == gp_id).first()
@@ -479,10 +487,14 @@ def upsert_race_result(
         prediction.multiplier = result_score["multiplier"]
 
     db.commit()
-    db.close()
-    return {"message": "Resultado guardado y puntuaciones calculadas automáticamente"}
 
+    print(f"🔄 Calculando logros para GP {gp_id}...")
+    evaluate_race_achievements(db, gp_id)
+    
+    db.close()
+    return {"message": "Resultado guardado, puntos calculados y logros actualizados."}
 @router.post("/predictions/{user_id}/{gp_id}")
+
 def upsert_prediction_admin(
     user_id: int,
     gp_id: int,
@@ -758,3 +770,22 @@ def delete_driver(id: int, current_user = Depends(require_admin)):
         db.commit()
     db.close()
     return {"message": "Piloto eliminado"}
+
+# -----------------------
+# ZONA DE PÁNICO
+# -----------------------
+
+@router.post("/panic/rebuild-achievements")
+def panic_rebuild_achievements(current_user = Depends(require_admin)):
+    """
+    🚨 BOTÓN DEL PÁNICO: Borra y recalcula TODOS los logros y estadísticas.
+    """
+    db = SessionLocal()
+    try:
+        rebuild_all_achievements(db)
+        db.close()
+        return {"message": "Reconstrucción completada con éxito. Todos los logros han sido recalculados."}
+    except Exception as e:
+        db.close()
+        print(f"Error en panic rebuild: {e}")
+        raise HTTPException(status_code=500, detail=f"Error durante la reconstrucción: {str(e)}")

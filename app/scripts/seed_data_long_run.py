@@ -55,16 +55,34 @@ ACHIEVEMENT_DEFINITIONS = [
     {"slug": "event_25pts", "name": "+25", "desc": "+25 pts.", "icon": "DollarSign", "rare": "COMMON", "type": "EVENT"},
     {"slug": "event_50pts", "name": "+50", "desc": "+50 pts.", "icon": "Package", "rare": "RARE", "type": "EVENT"},
     {"slug": "event_nostradamus", "name": "Nostradamus", "desc": "Podio Exacto.", "icon": "CrystalBall", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_el_profesor", "name": "El Profesor", "desc": "Top 5 Exacto.", "icon": "GraduationCap", "rare": "LEGENDARY", "type": "EVENT"},
     {"slug": "event_high_five", "name": "High 5", "desc": "5 Exactos.", "icon": "Hand", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_sexto_sentido", "name": "Sexto Sentido", "desc": "6 Exactos.", "icon": "Eye", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_7_maravillas", "name": "7 Maravillas", "desc": "7 Exactos.", "icon": "Globe", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_bola_8", "name": "Bola 8", "desc": "8 Exactos.", "icon": "Disc", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_nube_9", "name": "Nube 9", "desc": "9 Exactos.", "icon": "Cloud", "rare": "LEGENDARY", "type": "EVENT"},
     {"slug": "event_la_decima", "name": "La Décima", "desc": "10 Exactos.", "icon": "Award", "rare": "LEGENDARY", "type": "EVENT"},
     {"slug": "event_oracle", "name": "Oráculo", "desc": "Top 10 presencia.", "icon": "Eye", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_el_narrador", "name": "El Narrador", "desc": "Todos Eventos OK.", "icon": "BookOpen", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_god", "name": "Omnisciente", "desc": "Todo (10pos + 4ev).", "icon": "Sun", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_casi_dios", "name": "Casi Dios", "desc": "Todo menos 1 fallo.", "icon": "ZapOff", "rare": "EPIC", "type": "EVENT"},
     {"slug": "event_mc", "name": "MC", "desc": "Eventos extra.", "icon": "Mic", "rare": "EPIC", "type": "EVENT"},
-    {"slug": "event_god", "name": "DIOS", "desc": "Todo perfecto.", "icon": "Sun", "rare": "LEGENDARY", "type": "EVENT"},
     {"slug": "event_grand_chelem", "name": "Chelem", "desc": "Pole+VR+Win.", "icon": "Maximize", "rare": "EPIC", "type": "EVENT"},
     {"slug": "event_civil_war", "name": "Civil War", "desc": "1-2 Compañeros.", "icon": "Swords", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_el_muro", "name": "El Muro", "desc": "Compañeros consecutivos.", "icon": "BrickWall", "rare": "RARE", "type": "EVENT"},
     {"slug": "event_tifosi", "name": "Tifosi", "desc": "Ferrari gana Monza.", "icon": "Italic", "rare": "RARE", "type": "EVENT"},
-    {"slug": "event_chaos", "name": "Caos", "desc": "Muchos DNFs.", "icon": "AlertTriangle", "rare": "RARE", "type": "EVENT"},
-    {"slug": "event_maldonado", "name": "Maldonado", "desc": "0 Puntos.", "icon": "Skull", "rare": "HIDDEN", "type": "EVENT"},
+    {"slug": "event_chaos", "name": "Profeta del Caos", "desc": ">4 DNFs y acertar #.", "icon": "AlertTriangle", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_francotirador_p10", "name": "Francotirador P10", "desc": "Acertar P10 Exacto.", "icon": "Target", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_la_maldicion", "name": "La Maldición", "desc": "Tu P1 fue DNF.", "icon": "Skull", "rare": "COMMON", "type": "EVENT"},
+    {"slug": "event_podio_invertido", "name": "Podio Invertido", "desc": "Podio al revés.", "icon": "RefreshCcw", "rare": "EPIC", "type": "EVENT"},
+    {"slug": "event_el_elegido", "name": "El Elegido", "desc": "Solo P1 (0 pts resto).", "icon": "Fingerprint", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_el_sandwich", "name": "El Sandwich", "desc": "P1 y P3 (P2 mal).", "icon": "Layers", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_lobo_solitario", "name": "Lobo Solitario", "desc": "MVP sin equipo.", "icon": "Moon", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_david_goliath", "name": "David vs Goliath", "desc": "x2 pts del Líder.", "icon": "TrendingUp", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_diamante", "name": "Diamante", "desc": "+75 pts.", "icon": "Diamond", "rare": "LEGENDARY", "type": "EVENT"},
+    {"slug": "event_el_optimista", "name": "El Optimista", "desc": "0 DNF y acierto.", "icon": "Smile", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_la_escoba", "name": "La Escoba", "desc": "VR fuera del podio.", "icon": "Brush", "rare": "RARE", "type": "EVENT"},
+    {"slug": "event_maldonado", "name": "Maldonado", "desc": "0 Puntos.", "icon": "Ghost", "rare": "HIDDEN", "type": "EVENT"},
 ]
 
 # Configuración de Simulación
@@ -144,8 +162,8 @@ def setup_season_infrastructure(db, year, active=False):
     db.add(s)
     
     # Multiplicadores
-    configs = [("FASTEST_LAP", 1.0), ("SAFETY_CAR", 2.0), ("DNFS", 2.0), 
-               ("DNF_DRIVER", 3.0), ("PODIUM_PARTIAL", 1.0), ("PODIUM_TOTAL", 2.0)]
+    configs = [("FASTEST_LAP", 1.5), ("SAFETY_CAR", 1.5), ("DNFS", 1.5), 
+               ("DNF_DRIVER", 1.5), ("PODIUM_PARTIAL", 1.25), ("PODIUM_TOTAL", 1.5)]
     for evt, val in configs:
         db.add(MultiplierConfig(season=s, event_type=evt, multiplier=val))
     db.commit()
@@ -221,6 +239,14 @@ def generate_prediction(real_pos, real_evts, skill):
     
     if random.random() < (0.4 + skill/2): pred_evts["FASTEST_LAP"] = real_evts["FASTEST_LAP"]
     else: pred_evts["FASTEST_LAP"] = random.choice(real_pos[:5])
+
+    if random.random() < (0.2 + skill/2): 
+        # Acierta uno de los que abandonaron (si hubo)
+        real_dnfs = real_evts.get("DNF_DRIVER", "").split(", ")
+        pred_evts["DNF_DRIVER"] = real_dnfs[0] if real_dnfs[0] else ""
+    else:
+        # Pone uno cualquiera
+        pred_evts["DNF_DRIVER"] = random.choice(real_pos)
     
     return pred_pos, pred_evts
 
@@ -245,11 +271,16 @@ def simulate_gp(db, season, gp_name, race_date, users, skill_map, drivers, multi
     remaining = [d for d in drivers if d not in real_pos]
     real_pos.extend(remaining)
     
+    num_dnfs = random.randint(0, 4)
+    # Escogemos pilotos aleatorios del fondo de la tabla para que sean los DNF
+    dnf_drivers_list = random.sample(real_pos[-8:], num_dnfs) if num_dnfs > 0 else []
+    dnf_str = ", ".join(dnf_drivers_list)
+
     real_evts = {
         "FASTEST_LAP": random.choice(real_pos[:3]), 
         "SAFETY_CAR": "Yes" if random.random() > 0.4 else "No",
-        "DNFS": str(random.randint(0, 4)),
-        "POLE_POSITION": random.choice(real_pos[:2])
+        "DNFS": str(num_dnfs),
+        "DNF_DRIVER": dnf_str,
     }
     
     # Guardar Resultado
@@ -271,7 +302,7 @@ def simulate_gp(db, season, gp_name, race_date, users, skill_map, drivers, multi
         
         # Scoring Mock
         class M: pass
-        m_p = M(); m_p.positions = [M() for _ in p_pos]; m_p.events = []
+        m_p = M(); m_p.positions = [M() for _ in p_pos[:10]]; m_p.events = []
         for i, x in enumerate(m_p.positions): x.driver_name=p_pos[i]; x.position=i+1
         for k,v in p_evts.items(): e=M(); e.event_type=k; e.value=str(v); m_p.events.append(e)
         m_r = M(); m_r.positions = [M() for _ in real_pos]; m_r.events = []
@@ -281,6 +312,7 @@ def simulate_gp(db, season, gp_name, race_date, users, skill_map, drivers, multi
         score = calculate_prediction_score(m_p, m_r, multipliers)
         pred.points = score["final_points"]
         pred.points_base = score["base_points"]
+        pred.multiplier = score["multiplier"]  # ← FIX: Guardar el multiplicador
     
     db.commit()
     

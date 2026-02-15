@@ -53,9 +53,11 @@ def evolution(
                 return {}
 
             for user in items:
+                # Solo incluir predicciones de GPs que tengan resultados guardados
                 preds = (
                     db.query(Prediction)
                     .join(GrandPrix)
+                    .join(RaceResult, RaceResult.gp_id == GrandPrix.id)  # JOIN con RaceResult
                     .filter(
                         Prediction.user_id == user.id,
                         GrandPrix.season_id == season_id
@@ -98,9 +100,11 @@ def evolution(
 
             for team in items:
                 member_ids = [tm.user_id for tm in team.members]
+                # Solo incluir predicciones de GPs que tengan resultados guardados
                 preds = (
                     db.query(Prediction)
                     .join(GrandPrix)
+                    .join(RaceResult, RaceResult.gp_id == GrandPrix.id)  # JOIN con RaceResult
                     .filter(
                         Prediction.user_id.in_(member_ids),
                         GrandPrix.season_id == season_id
@@ -199,8 +203,10 @@ def ranking(
                         elif mode == "multiplier":
                             gp_points = p.multiplier
                             acc[u.username] *= gp_points
-                    
-                    # Si no hay predicción, el acumulado se mantiene (o suma 0)
+                    else:
+                        # Si no hay predicción en modo multiplier, multiplicamos por 1.0 (neutro)
+                        if mode == "multiplier":
+                            acc[u.username] *= gp_points  # gp_points ya es 1.0
 
                     gp_ranking.append({
                         "name": u.username,
@@ -267,6 +273,10 @@ def ranking(
                             for p in preds:
                                 gp_points *= p.multiplier
                             acc[t.name] *= gp_points
+                    else:
+                        # Si no hay predicciones en modo multiplier, multiplicamos por 1.0 (neutro)
+                        if mode == "multiplier":
+                            acc[t.name] *= gp_points  # gp_points ya es 1.0
                     
                     gp_ranking.append({
                         "name": t.name,

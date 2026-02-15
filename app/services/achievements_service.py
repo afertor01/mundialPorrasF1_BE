@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, and_, or_
 from typing import Set, List, Optional
 
@@ -14,7 +14,7 @@ from app.db.models.grand_prix import GrandPrix
 from app.db.models.user import User
 from app.db.models.driver import Driver
 from app.db.models.constructor import Constructor
-from app.db.models.user_stats import UserStats
+from app.db.models.user_stats import UserStats, UserGpStats # <--- IMPORTANTE
 from app.db.models.team_member import TeamMember
 
 # ==============================================================================
@@ -22,62 +22,175 @@ from app.db.models.team_member import TeamMember
 # ==============================================================================
 
 def get_dynamic_slugs() -> Set[str]:
-    """
-    Devuelve los slugs de logros que se evalúan carrera a carrera.
-    Los logros de 'Finale' (Campeón, Mochila, Squad Leader) NO están aquí 
-    porque no deben revocarse durante la temporada regular.
-    """
     return {
         # Career Stats
         "career_debut", "career_500", "career_1000", "career_2500", 
-        "career_50_gps", "career_50_exact",
+        "career_50_gps", "career_50_exact", 
+        "career_goat", "career_100_exact", "career_10_full_podium",
+        "career_5_fl", "career_10_fl",
+        "career_5_sc", "career_10_sc",
+        "career_5_dnf_count", "career_10_dnf_count",
+        "career_5_dnf_driver", "career_10_dnf_driver",
         # Season Stats (Puntos)
         "season_100", "season_300", "season_500",
         # Eventos
         "event_first", "event_join_team", "event_25pts", "event_50pts", 
         "event_nostradamus", "event_high_five", "event_la_decima", 
         "event_oracle", "event_mc", "event_god", "event_grand_chelem", 
-        "event_civil_war", "event_tifosi", "event_chaos", "event_maldonado"
+        "event_civil_war", "event_chaos", "event_maldonado",
+        # NUEVOS
+        "event_el_profesor", "event_sexto_sentido", "event_7_maravillas",
+        "event_bola_8", "event_nube_9", "event_el_narrador",
+        "event_casi_dios", "event_diamante", "event_el_optimista",
+        "event_la_escoba", "event_el_muro", "event_francotirador_p10",
+        "event_la_maldicion", "event_podio_invertido",
+        "event_el_elegido", "event_el_sandwich", "event_lobo_solitario",
+        "event_david_goliath"
     }
 
 # ==============================================================================
-# 1. GESTIÓN DE ESTADÍSTICAS
+# 1. GESTIÓN DE ESTADÍSTICAS (INCREMENTAL ROBUSTO + CACHÉ)
 # ==============================================================================
 
-def recalculate_user_stats(db: Session, user_id: int, current_gp: GrandPrix) -> UserStats:
+def calculate_gp_metrics(prediction: Prediction, result: RaceResult) -> dict:
+    """
+    Compara predicción y resultado y devuelve un diccionario con los contadores.
+    No guarda nada en DB, solo calcula lógica pura.
+    """
+    metrics = {
+        "points": prediction.points or 0,
+        "exact_positions": 0,
+        "exact_podium_hit": False,
+        "exact_top5_hit": False, # Nuevo
+        "fastest_lap_hit": False,
+        "safety_car_hit": False,
+        "dnf_count_hit": False,
+        "dnf_driver_hit": False,
+        "p10_hit": False # Nuevo
+    }
+
+    if not result: return metrics
+
+    u_pos = {p.position: p.driver_name for p in prediction.positions}
+    r_pos = {p.position: p.driver_name for p in result.positions}
+    u_evts = {e.event_type: e.value for e in prediction.events}
+    r_evts = {e.event_type: e.value for e in result.events}
+
+    # 1. Posiciones Exactas
+    metrics["exact_positions"] = sum(1 for i in range(1, 11) if u_pos.get(i) == r_pos.get(i))
+
+    # 2. Podio Exacto
+    if (u_pos.get(1) == r_pos.get(1) and u_pos.get(2) == r_pos.get(2) and u_pos.get(3) == r_pos.get(3)):
+        metrics["exact_podium_hit"] = True
+
+    # 2b. Top 5 Exacto
+    if metrics["exact_podium_hit"] and u_pos.get(4) == r_pos.get(4) and u_pos.get(5) == r_pos.get(5):
+        metrics["exact_top5_hit"] = True
+
+    # 2c. P10 hit
+    if u_pos.get(10) == r_pos.get(10):
+        metrics["p10_hit"] = True
+
+    # 3. Eventos (Normalización básica de strings)
+    if str(u_evts.get("FASTEST_LAP", "")).strip() == str(r_evts.get("FASTEST_LAP", "")).strip():
+        metrics["fastest_lap_hit"] = True
+        
+    if str(u_evts.get("SAFETY_CAR", "")).lower().strip() == str(r_evts.get("SAFETY_CAR", "")).lower().strip():
+        metrics["safety_car_hit"] = True
+        
+    if str(u_evts.get("DNFS", "")) == str(r_evts.get("DNFS", "")):
+        metrics["dnf_count_hit"] = True
+
+    # 4. DNF Driver
+    u_dnf = str(u_evts.get("DNF_DRIVER", "")).strip()
+    r_dnf_raw = str(r_evts.get("DNF_DRIVER", ""))
+    r_dnf_list = [x.strip() for x in r_dnf_raw.split(",")]
+    r_dnf_count = int(r_evts.get("DNFS", 0))
+
+    if r_dnf_count == 0 and u_dnf in ["", "0", "None", "-", "no"]:
+        metrics["dnf_driver_hit"] = True
+    elif r_dnf_count > 0 and u_dnf and u_dnf in r_dnf_list:
+        metrics["dnf_driver_hit"] = True
+
+    return metrics
+
+
+def update_stats_incremental(db: Session, user_id: int, gp: GrandPrix) -> UserStats:
+    """
+    Actualiza UserStats usando UserGpStats como caché intermedia.
+    Permite re-ejecutar el mismo GP y corrige los datos (Restar anterior, Sumar nuevo).
+    """
+    # 1. Obtener Stats Globales
     stats = db.query(UserStats).filter(UserStats.user_id == user_id).first()
     if not stats:
         stats = UserStats(user_id=user_id)
         db.add(stats)
 
-    # 1. Puntos Totales (Career)
-    stats.total_points = db.query(func.sum(Prediction.points)).filter(Prediction.user_id == user_id).scalar() or 0.0
+    # 2. Protección de orden cronológico:
+    # No calculamos GPs pasados si ya vamos por delante, a menos que sea un Rebuild forzado.
+    # Pero si es el mismo GP que el último jugado (o posterior), permitimos la actualización.
+    if stats.last_gp_played_id and gp.id < stats.last_gp_played_id:
+        # Podríamos lanzar warning, pero simplemente devolvemos stats sin tocar
+        return stats
+
+    # 3. Obtener Predicción y Resultado
+    pred = db.query(Prediction).filter(Prediction.user_id == user_id, Prediction.gp_id == gp.id).first()
+    if not pred or not gp.race_result: 
+        return stats
+
+    # 4. Calcular Métricas ACTUALES de este GP (En memoria)
+    new = calculate_gp_metrics(pred, gp.race_result)
+
+    # 5. Buscar si ya existían métricas guardadas para este GP (La "Caché")
+    gp_stats = db.query(UserGpStats).filter(UserGpStats.user_id == user_id, UserGpStats.gp_id == gp.id).first()
+
+    if gp_stats:
+        # --- MODO CORRECCIÓN: RESTAR LO VIEJO ---
+        stats.total_points -= gp_stats.points
+        
+        # Asumimos que estamos corrigiendo la temporada actual
+        if gp.season_id == gp.season_id: 
+            stats.current_season_points -= gp_stats.points
+        
+        stats.exact_positions_count -= gp_stats.exact_positions
+        if gp_stats.exact_podium_hit: stats.exact_podiums_count -= 1
+        if gp_stats.fastest_lap_hit: stats.fastest_lap_hits -= 1
+        if gp_stats.safety_car_hit: stats.safety_car_hits -= 1
+        if gp_stats.dnf_count_hit: stats.dnf_count_hits -= 1
+        if gp_stats.dnf_driver_hit: stats.dnf_driver_hits -= 1
+        
+    else:
+        # --- MODO NUEVO: CREAR CACHÉ ---
+        gp_stats = UserGpStats(user_id=user_id, gp_id=gp.id)
+        stats.total_gps_played += 1
+        db.add(gp_stats)
+
+    # 6. --- APLICAR: SUMAR LO NUEVO ---
+    stats.total_points += new["points"]
+    stats.current_season_points += new["points"]
     
-    # 2. Puntos Temporada Actual (Season)
-    stats.current_season_points = db.query(func.sum(Prediction.points))\
-        .join(GrandPrix)\
-        .filter(Prediction.user_id == user_id, GrandPrix.season_id == current_gp.season_id)\
-        .scalar() or 0.0
+    stats.exact_positions_count += new["exact_positions"]
+    if new["exact_podium_hit"]: stats.exact_podiums_count += 1
+    if new["fastest_lap_hit"]: stats.fastest_lap_hits += 1
+    if new["safety_car_hit"]: stats.safety_car_hits += 1
+    if new["dnf_count_hit"]: stats.dnf_count_hits += 1
+    if new["dnf_driver_hit"]: stats.dnf_driver_hits += 1
 
-    # 3. Participación
-    stats.total_gps_played = db.query(func.count(Prediction.id)).filter(Prediction.user_id == user_id).scalar() or 0
+    # Actualizar metadatos de "último jugado"
+    if not stats.last_gp_played_id or gp.id >= stats.last_gp_played_id:
+        stats.last_gp_played_id = gp.id
+        stats.last_gp_played_date = gp.race_datetime
 
-    # 4. Aciertos Exactos Totales
-    stats.exact_positions_count = db.query(func.count(PredictionPosition.id))\
-        .join(Prediction).join(RaceResult, Prediction.gp_id == RaceResult.gp_id)\
-        .join(RacePosition, and_(
-            RaceResult.id == RacePosition.race_result_id,
-            PredictionPosition.position == RacePosition.position,
-            PredictionPosition.driver_name == RacePosition.driver_name
-        ))\
-        .filter(Prediction.user_id == user_id)\
-        .scalar() or 0
+    # 7. Actualizar la "Caché" con los nuevos valores para el futuro
+    gp_stats.points = new["points"]
+    gp_stats.exact_positions = new["exact_positions"]
+    gp_stats.exact_podium_hit = new["exact_podium_hit"]
+    gp_stats.fastest_lap_hit = new["fastest_lap_hit"]
+    gp_stats.safety_car_hit = new["safety_car_hit"]
+    gp_stats.dnf_count_hit = new["dnf_count_hit"]
+    gp_stats.dnf_driver_hit = new["dnf_driver_hit"]
 
-    stats.last_gp_played_date = current_gp.race_datetime
-    stats.last_gp_played_id = current_gp.id
-
-    db.add(stats)
-    db.flush()
+    db.commit()
     return stats
 
 # ==============================================================================
@@ -88,83 +201,167 @@ def check_event_achievements(db: Session, user_id: int, gp: GrandPrix) -> Set[st
     """Verifica logros tipo EVENT basándose ÚNICAMENTE en el GP actual."""
     unlocks = set()
     
-    prediction = db.query(Prediction).filter(Prediction.user_id == user_id, Prediction.gp_id == gp.id).first()
-    if not prediction or not gp.race_result: return unlocks
-    res = gp.race_result
+    pred = db.query(Prediction).filter(Prediction.user_id == user_id, Prediction.gp_id == gp.id).first()
+    if not pred or not gp.race_result: return unlocks
     
-    points = prediction.points or 0
-    real_pos = {rp.position: rp.driver_name for rp in res.positions}
-    user_pos = {pp.position: pp.driver_name for pp in prediction.positions}
-    real_evts = {re.event_type: re.value for re in res.events}
-    user_evts = {ue.event_type: ue.value for ue in prediction.events}
-
-    exact_hits = sum(1 for i in range(1, 11) if user_pos.get(i) == real_pos.get(i))
-    podium_hits = sum(1 for i in range(1, 4) if user_pos.get(i) == real_pos.get(i))
+    # Reutilizamos la lógica de métricas para no repetir código
+    m = calculate_gp_metrics(pred, gp.race_result)
     
-    hit_sc = user_evts.get("SAFETY_CAR") == real_evts.get("SAFETY_CAR")
-    hit_fl = user_evts.get("FASTEST_LAP") == real_evts.get("FASTEST_LAP")
-    hit_dnf = int(user_evts.get("DNFS", 0)) == int(real_evts.get("DNFS", 0))
-    
-    # Comprobación del DNF Driver
-    user_dnf_driver_pred = user_evts.get("DNF_DRIVER")
-    real_dnf_drivers_str = real_evts.get("DNF_DRIVER") # Puede ser una lista "VER,PER"
-    real_dnfs_count = int(real_evts.get("DNFS", 0))
-    hit_dnf_driver = False
-    if hit_dnf and real_dnfs_count == 0:
-        hit_dnf_driver = True
-    elif real_dnfs_count > 0 and user_dnf_driver_pred and real_dnf_drivers_str:
-        hit_dnf_driver = user_dnf_driver_pred in real_dnf_drivers_str.split(',')
-
-    hit_pole = user_evts.get("POLE_POSITION") == real_evts.get("POLE_POSITION")
-    events_hit_count = sum([hit_sc, hit_fl, hit_dnf, hit_dnf_driver])
-
-    # Logros
+    # --- PUNTOS ---
+    points = m["points"]
     if points > 0: unlocks.add("event_first")
     if points > 25: unlocks.add("event_25pts")
     if points > 50: unlocks.add("event_50pts")
+    if points > 75: unlocks.add("event_diamante") # Nuevo
     if points == 0: unlocks.add("event_maldonado")
 
-    if podium_hits == 3: unlocks.add("event_nostradamus")
-    if exact_hits >= 5: unlocks.add("event_high_five")
-    if exact_hits >= 10: unlocks.add("event_la_decima")
+    # --- HISTOS EXACTOS ---
+    if m["exact_podium_hit"]: unlocks.add("event_nostradamus")
+    if m["exact_top5_hit"]: unlocks.add("event_el_profesor") # Nuevo
+
+    hits = m["exact_positions"]
+    if hits >= 5: unlocks.add("event_high_five")
+    if hits >= 6: unlocks.add("event_sexto_sentido") # Nuevo
+    if hits >= 7: unlocks.add("event_7_maravillas") # Nuevo
+    if hits >= 8: unlocks.add("event_bola_8") # Nuevo
+    if hits >= 9: unlocks.add("event_nube_9") # Nuevo
+    if hits >= 10: unlocks.add("event_la_decima")
     
-    real_top10 = {real_pos.get(i) for i in range(1,11) if real_pos.get(i)}
-    user_top10 = {user_pos.get(i) for i in range(1,11) if user_pos.get(i)}
+    if m["p10_hit"]: unlocks.add("event_francotirador_p10") # Nuevo
+
+    # --- EVENTOS PERFECTOS ---
+    events_hit_count = sum([m["safety_car_hit"], m["fastest_lap_hit"], m["dnf_count_hit"], m["dnf_driver_hit"]])
+    if events_hit_count == 4: 
+        unlocks.add("event_mc")
+        unlocks.add("event_el_narrador") # Renegombrado/Nuevo
+
+    # --- COMBINADOS (DIOS / CASI DIOS) ---
+    # Dios: 10 posiciones + 4 eventos
+    if hits == 10 and events_hit_count == 4: 
+        unlocks.add("event_god")
+    
+    # Casi Dios: (10 pos + 3 ev) OR (9 pos + 4 ev)
+    if (hits == 10 and events_hit_count == 3) or (hits == 9 and events_hit_count == 4):
+        unlocks.add("event_casi_dios")
+
+    # --- ORACLE (Top 10 presencia) ---
+    u_pos = {p.position: p.driver_name for p in pred.positions}
+    r_pos = {p.position: p.driver_name for p in gp.race_result.positions}
+    u_evts = {e.event_type: e.value for e in pred.events}
+    r_evts = {e.event_type: e.value for e in gp.race_result.events}
+
+    real_top10 = {r_pos.get(i) for i in range(1,11) if r_pos.get(i)}
+    user_top10 = {u_pos.get(i) for i in range(1,11) if u_pos.get(i)}
     if len(real_top10) == 10 and real_top10 == user_top10: unlocks.add("event_oracle")
-
-    if events_hit_count == 4: unlocks.add("event_mc")
-    if exact_hits == 10 and events_hit_count == 4: unlocks.add("event_god")
     
-    hit_p1 = user_pos.get(1) == real_pos.get(1)
-    if hit_pole and hit_fl and hit_p1: unlocks.add("event_grand_chelem")
+    # --- GRAND CHELEM ---
+    hit_p1 = u_pos.get(1) == r_pos.get(1)
+    if m["safety_car_hit"] and m["fastest_lap_hit"] and hit_p1: unlocks.add("event_grand_chelem")
 
-    real_dnf_num = int(real_evts.get("DNFS", 0))
-    if real_dnf_num > 4 and hit_dnf: unlocks.add("event_chaos")
+    # --- CAOS / OPTIMISTA ---
+    real_dnf_num = int([e.value for e in gp.race_result.events if e.event_type == "DNFS"][0] or 0)
+    user_dnf_num = int([e.value for e in pred.events if e.event_type == "DNFS"][0] or 0)
+    
+    if real_dnf_num > 4 and m["dnf_count_hit"]: unlocks.add("event_chaos")
+    if user_dnf_num == 0 and m["dnf_count_hit"]: unlocks.add("event_el_optimista") # Nuevo
 
-    # Civil War
-    p1, p2 = user_pos.get(1), user_pos.get(2)
-    if p1 and p2 and p1 == real_pos.get(1) and p2 == real_pos.get(2):
+    # --- LA ESCOBA (VR Ok, pero Piloto NO en Podio) ---
+    vr_driver = str(r_evts.get("FASTEST_LAP", ""))
+    podium_drivers = [r_pos.get(1), r_pos.get(2), r_pos.get(3)]
+    if m["fastest_lap_hit"] and vr_driver not in podium_drivers:
+        unlocks.add("event_la_escoba") # Nuevo
+
+    # --- LA MALDICIÓN (Tu P1 es DNF) ---
+    my_p1 = u_pos.get(1)
+    real_dnf_list = [x.strip() for x in str(r_evts.get("DNF_DRIVER", "")).split(",")]
+    if my_p1 in real_dnf_list:
+        unlocks.add("event_la_maldicion") # Nuevo
+
+    # --- PODIO INVERTIDO ---
+    # Real: 1:A, 2:B, 3:C -> User: 1:C, 2:B, 3:A
+    if (u_pos.get(1) == r_pos.get(3) and 
+        u_pos.get(2) == r_pos.get(2) and 
+        u_pos.get(3) == r_pos.get(1)):
+        unlocks.add("event_podio_invertido") # Nuevo
+
+    # --- EL SANDWICH (P1 ok, P3 ok, P2 fail) ---
+    hit_p3 = u_pos.get(3) == r_pos.get(3)
+    hit_p2 = u_pos.get(2) == r_pos.get(2)
+    if hit_p1 and hit_p3 and not hit_p2:
+        unlocks.add("event_el_sandwich") # Nuevo
+    
+    # --- EL ELEGIDO (Solo P1 acertado, todo lo demás fallado) ---
+    # Verifica que points no sea 0 (implica que P1 puntuó) y que exact_positions sea 1 (solo P1)
+    # y además que eventos sea 0. Ojo: "points" puede venir de P1, pero también de proximidad.
+    # El requisito dice "Acertar solo al Ganador (P1) y fallar absolutamente todas las demás posiciones y eventos".
+    if hit_p1 and hits == 1 and events_hit_count == 0:
+        # Falta asegurar que NO acertó posiciones parciales (ej: P4 en P5).
+        # Verificamos que para i=2..10, u_pos[i] != r_pos[i]. Ya cubierto por hits==1.
+        # ¿Y si acertó P2 en P3? Eso da puntos pero no es hit exacto.
+        # El user dice "sacar puntos solo por el ganador". El sistema de puntos da puntos por acierto exacto.
+        # Asumiremos la interpretación estricta: Hits=1 (P1) y Events=0.
+        unlocks.add("event_el_elegido")
+
+    # --- CIVIL WAR (1-2 Compañeros) ---
+    p1, p2 = u_pos.get(1), u_pos.get(2)
+    if p1 and p2 and p1 == r_pos.get(1) and p2 == r_pos.get(2):
         d1 = db.query(Driver).filter_by(code=p1).first()
         d2 = db.query(Driver).filter_by(code=p2).first()
         if d1 and d2 and d1.constructor_id == d2.constructor_id:
             unlocks.add("event_civil_war")
-
-    # Tifosi
-    if points > 0 and ("Monza" in gp.name or "Italy" in gp.name):
-        winner = real_pos.get(1)
-        if winner:
-            d_win = db.query(Driver).filter_by(code=winner).first()
-            if d_win and d_win.constructor and "Ferrari" in d_win.constructor.name:
-                unlocks.add("event_tifosi")
     
-    # Join Team
+    # --- EL MURO (Compañeros consecutivos) ---
+    # Buscar si existen i, i+1 tal que u_pos[i] y u_pos[i+1] sean compañeros Y acertados.
+    # La descripción dice: "Acertar que dos compañeros de equipo acaban consecutivos (ej: P5 y P6)".
+    # Entiendo que deben ser ACIERTOS.
+    found_wall = False
+    for i in range(1, 10):
+        da = u_pos.get(i)
+        db_drv = u_pos.get(i+1)
+        # Ambos acertados
+        if da == r_pos.get(i) and db_drv == r_pos.get(i+1):
+            driver_a = db.query(Driver).filter_by(code=da).first()
+            driver_b = db.query(Driver).filter_by(code=db_drv).first()
+            if driver_a and driver_b and driver_a.constructor_id == driver_b.constructor_id:
+                found_wall = True
+                break
+    if found_wall: unlocks.add("event_el_muro") # Nuevo
+
+    # --- JOIN TEAM ---
     has_team = db.query(TeamMember).filter(TeamMember.user_id == user_id, TeamMember.season_id == gp.season_id).first()
     if has_team: unlocks.add("event_join_team")
+
+    # --- LOBO SOLITARIO & DAVID vs GOLIATH (Globales) ---
+    # Requieren contexto de OTROS usuarios.
+    
+    # 1. Obtener puntos de todos en este GP
+    all_preds = db.query(Prediction.user_id, Prediction.points).filter(Prediction.gp_id == gp.id).all()
+    if all_preds:
+        max_points = max(p.points for p in all_preds)
+        
+        # Lobo Solitario: Ser MVP (max_points) Y no tener equipo
+        if points == max_points and not has_team:
+            unlocks.add("event_lobo_solitario")
+
+        # David vs Goliath: Sacar el doble que el Líder del Mundial
+        # ¿Quién es el líder? El que tenga más current_season_points antes de sumar este GP o incluyendo?
+        # Normalmente "Líder del Mundial" es el que va primero en la general.
+        # Usaremos UserStats (que ya tiene los puntos actualizados con este GP si se corrió update_stats).
+        # Aunque update_stats se corre user a user.
+        # Haremos una query rápida para ver quién tiene más puntos en UserStats.
+        leader_stat = db.query(UserStats).order_by(desc(UserStats.current_season_points)).first()
+        if leader_stat:
+            # Puntos que sacó el líder en ESTE GP.
+            leader_pred = db.query(Prediction).filter(Prediction.user_id == leader_stat.user_id, Prediction.gp_id == gp.id).first()
+            leader_gp_points = leader_pred.points if leader_pred else 0
+            
+            if points >= (leader_gp_points * 2) and leader_gp_points > 0:
+                 unlocks.add("event_david_goliath")
 
     return unlocks
 
 def check_career_season_achievements(db: Session, user_id: int, stats: UserStats) -> Set[str]:
-    """Verifica logros CAREER y SEASON."""
+    """Verifica logros CAREER y SEASON contra los Stats Acumulados."""
     unlocks = set()
     
     # CAREER (Acumulativo Global)
@@ -174,6 +371,19 @@ def check_career_season_achievements(db: Session, user_id: int, stats: UserStats
     if stats.total_points >= 2500: unlocks.add("career_2500")
     if stats.total_gps_played >= 50: unlocks.add("career_50_gps")
     if stats.exact_positions_count >= 50: unlocks.add("career_50_exact")
+    
+    # NUEVOS
+    if stats.total_points >= 5000: unlocks.add("career_goat")
+    if stats.exact_positions_count >= 100: unlocks.add("career_100_exact")
+    if stats.exact_podiums_count >= 10: unlocks.add("career_10_full_podium")
+    if stats.safety_car_hits >= 5: unlocks.add("career_5_sc")
+    if stats.safety_car_hits >= 10: unlocks.add("career_10_sc")
+    if stats.fastest_lap_hits >= 5: unlocks.add("career_5_fl")
+    if stats.fastest_lap_hits >= 10: unlocks.add("career_10_fl")
+    if stats.dnf_count_hits >= 5: unlocks.add("career_5_dnf_count")
+    if stats.dnf_count_hits >= 10: unlocks.add("career_10_dnf_count")
+    if stats.dnf_driver_hits >= 5: unlocks.add("career_5_dnf_driver")
+    if stats.dnf_driver_hits >= 10: unlocks.add("career_10_dnf_driver")
 
     # SEASON (Acumulativo Temporada Actual)
     if stats.current_season_points >= 100: unlocks.add("season_100")
@@ -195,6 +405,8 @@ def check_season_finale_achievements(db: Session, user_id: int, season_id: int) 
     
     rank = next((i+1 for i, s in enumerate(stats_all) if s.user_id == user_id), 999)
     if rank == 1: unlocks.add("career_champion")
+    if rank == 2: unlocks.add("career_runner_up")
+    if rank == 3: unlocks.add("career_bronze")
 
     stat_entry = next((s for s in stats_all if s.user_id == user_id), None)
     if stat_entry:
@@ -216,15 +428,17 @@ def check_season_finale_achievements(db: Session, user_id: int, season_id: int) 
 # ==============================================================================
 
 def verify_historical_validity(db: Session, user_id: int, slug: str) -> bool:
+    # Mantenemos esta función para el sistema de revocación
+    # aunque ahora con UserGpStats es menos crítico, sigue siendo útil
+    # para auditorías.
     def _has_gp_with_exact_hits(n):
         preds = db.query(Prediction).filter(Prediction.user_id == user_id).all()
         for p in preds:
             rr = db.query(RaceResult).filter(RaceResult.gp_id == p.gp_id).first()
             if not rr: continue
-            r_pos = {rp.position: rp.driver_name for rp in rr.positions}
-            u_pos = {pp.position: pp.driver_name for pp in p.positions}
-            hits = sum(1 for i in range(1,21) if r_pos.get(i) == u_pos.get(i))
-            if hits >= n: return True
+            # Usamos el helper nuevo
+            m = calculate_gp_metrics(p, rr)
+            if m["exact_positions"] >= n: return True
         return False
 
     if slug == "event_25pts": return db.query(Prediction).filter(Prediction.user_id==user_id, Prediction.points > 25).first() is not None
@@ -238,7 +452,7 @@ def verify_historical_validity(db: Session, user_id: int, slug: str) -> bool:
     return True
 
 # ==============================================================================
-# 4. ORQUESTADOR (SYNC CON PROTECCIÓN DE TEMPORADA + GP ID)
+# 4. ORQUESTADOR PRINCIPAL
 # ==============================================================================
 
 def grant_achievements(
@@ -248,32 +462,23 @@ def grant_achievements(
     season_id: int = None, 
     gp_id: int = None
 ):
-    """
-    Otorga logros, guardando el contexto (GP y Season) cuando corresponde.
-    """
-    # Obtenemos lista de slugs que ya tiene (para comprobar existencia)
     existing_rows = db.query(UserAchievement).filter(UserAchievement.user_id == user_id).all()
     
     for slug in slugs:
         ach = db.query(Achievement).filter_by(slug=slug).first()
         if not ach: continue
 
-        already_has = False
-        
-        # Lógica de Duplicados: Un logro solo se otorga una vez en la vida.
         already_has = any(r.achievement_id == ach.id for r in existing_rows)
 
         if not already_has:
             print(f"🏆 DESBLOQUEADO: {slug}")
-            
-            # Contexto a guardar
             save_season = season_id
             save_gp = None
             
             if ach.type == AchievementType.EVENT:
-                save_gp = gp_id # Guardamos DÓNDE ocurrió
+                save_gp = gp_id
             elif ach.type == AchievementType.CAREER:
-                save_gp = gp_id # Guardamos CUÁNDO ocurrió (opcional, pero útil)
+                save_gp = gp_id 
             
             db.add(UserAchievement(
                 user_id=user_id, 
@@ -287,17 +492,17 @@ def grant_achievements(
 
 def sync_achievements(db: Session, user_id: int, current_gp: GrandPrix):
     """
-    Sincroniza logros asegurando que NO se borran logros de temporadas pasadas.
+    Sincroniza logros usando el método INCREMENTAL.
     """
-    # 1. Stats Actuales
-    stats = recalculate_user_stats(db, user_id, current_gp)
+    # 1. Stats Actuales (Incremental con soporte de Corrección)
+    stats = update_stats_incremental(db, user_id, current_gp)
     
     # 2. Qué debería tener HOY
     should_have = set()
     should_have.update(check_career_season_achievements(db, user_id, stats))
     should_have.update(check_event_achievements(db, user_id, current_gp))
     
-    # 3. GRANT (Pasamos current_gp.id para guardar el contexto)
+    # 3. GRANT
     grant_achievements(
         db, 
         user_id, 
@@ -306,27 +511,20 @@ def sync_achievements(db: Session, user_id: int, current_gp: GrandPrix):
         gp_id=current_gp.id
     )
     
-    # 4. REVOKE (Quitar lo que ya no cumple, CON PROTECCIÓN)
+    # 4. REVOKE
     current_achs_rows = db.query(UserAchievement, Achievement.slug, Achievement.type)\
         .join(Achievement).filter(UserAchievement.user_id == user_id).all()
         
     dynamic_slugs = get_dynamic_slugs()
 
     for ua, slug, atype in current_achs_rows:
-        
-        # A) PROTECCIÓN: ¿Es un logro gestionado dinámicamente?
-        if slug not in dynamic_slugs:
-            continue
-
-        # B) PROTECCIÓN DE TEMPORADA
+        if slug not in dynamic_slugs: continue
         if atype == AchievementType.SEASON:
             if ua.season_id is not None and ua.season_id != current_gp.season_id:
-                continue # Es un logro histórico, se respeta.
+                continue 
         
-        # C) CHECK DE VALIDEZ ACTUAL
         if slug not in should_have:
             must_delete = True
-            
             if atype == AchievementType.EVENT:
                 if verify_historical_validity(db, user_id, slug):
                     must_delete = False
@@ -342,21 +540,117 @@ def evaluate_race_achievements(db: Session, gp_id: int):
     gp = db.query(GrandPrix).get(gp_id)
     if not gp: return
     users = [u[0] for u in db.query(Prediction.user_id).filter(Prediction.gp_id == gp_id).distinct().all()]
-    # print(f"🔄 Sync Logros ({gp.name}) para {len(users)} usuarios...")
     for uid in users: sync_achievements(db, uid, gp)
 
 def evaluate_season_finale_achievements(db: Session, season_id: int):
-    print(f"🏆 Evaluando Premios Finales Temporada {season_id}...")
-    last_gp = db.query(GrandPrix).filter(GrandPrix.season_id == season_id).order_by(desc(GrandPrix.race_datetime)).first()
-    if not last_gp: return
+    """
+    Evalúa premios finales aplicando lógica WIPE & ASSIGN.
+    1. Borra todos los logros de final de temporada existentes para esa season_id.
+    2. Recalcula quién los merece ahora (basado en los stats ya corregidos).
+    3. Los otorga de nuevo.
+    """
+    print(f"🏆 Evaluando Premios Finales Temporada {season_id} (Modo Wipe & Assign)...")
+    
+    # --- 0. WIPE (LIMPIEZA DE PREMIOS ANTERIORES) ---
+    # Definimos qué logros son exclusivos de final de temporada
+    finale_slugs = [
+        "career_champion", 
+        "career_runner_up", 
+        "career_bronze", 
+        "season_squad_leader", 
+        "season_backpack"
+    ]
+    
+    # Obtenemos los IDs de estos logros
+    target_achs = db.query(Achievement.id).filter(Achievement.slug.in_(finale_slugs)).all()
+    target_ids = [t[0] for t in target_achs]
+    
+    if target_ids:
+        deleted_count = db.query(UserAchievement).filter(
+            UserAchievement.season_id == season_id,
+            UserAchievement.achievement_id.in_(target_ids)
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+        print(f"🧹 Se han revocado {deleted_count} logros antiguos de la temporada {season_id}.")
+
+    # --- 1. ASSIGN (CÁLCULO Y ASIGNACIÓN NUEVA) ---
+    # Nota: No necesitamos recalcular stats aquí, confiamos en que update_stats_incremental 
+    # ya tiene los UserStats al día.
     
     all_users = db.query(User).all()
-    # 1. Recalcular stats finales
+    
     for user in all_users:
-        recalculate_user_stats(db, user.id, last_gp)
-        
-    # 2. Dar premios finales (gp_id=None porque es de toda la temporada)
-    for user in all_users:
+        # Checkeamos qué merece el usuario con los datos actuales
         slugs = check_season_finale_achievements(db, user.id, season_id)
+        
         if slugs: 
+            # Grant achievements se encarga de no duplicar, pero como acabamos de borrar,
+            # los insertará limpios.
             grant_achievements(db, user.id, list(slugs), season_id=season_id, gp_id=None)
+
+    print(f"✅ Evaluación de temporada {season_id} completada.")
+    
+def rebuild_all_achievements(db: Session):
+    """
+    ⚠️ DANGER ZONE: Recalcula TODO desde cero (Stats + Achievements).
+    1. Borra user_stats, user_gp_stats, user_achievements.
+    2. Recorre GPs pasados y ejecuta sync_achievements.
+    3. Al final de cada temporada, ejecuta evaluate_season_finale_achievements.
+    """
+    print("🔥 INICIANDO RECONSTRUCCIÓN TOTAL DE LOGROS Y ESTADÍSTICAS...")
+    
+    # 1. Resetear Tablas
+    db.query(UserAchievement).delete()
+    db.query(UserStats).delete()
+    db.query(UserGpStats).delete()
+    db.commit()
+
+    # 2. Obtener todos los GPs pasados ordenados por fecha
+    from datetime import datetime
+    past_gps = db.query(GrandPrix)\
+        .filter(GrandPrix.race_datetime <= datetime.utcnow())\
+        .order_by(GrandPrix.race_datetime.asc())\
+        .all()
+
+    users = db.query(User).all()
+    user_ids = [u.id for u in users]
+    
+    # Agrupar GPs por temporada para saber cuándo cerrar temporada
+    from collections import defaultdict
+    gps_by_season = defaultdict(list)
+    for gp in past_gps:
+        if gp.race_result: # Solo procesar si tiene resultados
+            gps_by_season[gp.season_id].append(gp)
+
+    # 3. Re-procesar uno a uno cronológicamente
+    # Pero cuidado, si iteramos por seasons separadas podríamos perder orden cronológico inter-season (raro pero posible).
+    # Mejor iterar la lista plana y detectar fin de season.
+    
+    processed_seasons = set()
+    
+    for gp in past_gps:
+        if not gp.race_result: continue
+        
+        print(f"   ⟳ Procesando GP: {gp.name} (Season {gp.season_id})...")
+        
+        # Sincronizar (Stats + Event Achievements)
+        for uid in user_ids:
+            sync_achievements(db, uid, gp)
+            
+        # Check if this is the last GP of the season (that has happened so far)
+        # O si es la última carrera programada de la temporada.
+        # Si la temporada ya acabó, deberíamos cerrar.
+        # Simplificación: Al final de procesar un GP, miramos si era el último de esa season en nuestra lista de 'past_gps'.
+        season_gps = gps_by_season[gp.season_id]
+        if season_gps[-1].id == gp.id:
+            # Es el último GP jugado de esta temporada
+            # ¿Pero ha terminado la temporada?
+            # Asumiremos que si estamos reconstruyendo, queremos dar los premios de final de temporada
+            # si ya se han jugado todos los GPs previstos O si es una temporada pasada.
+            # Por simplicidad: Siempre evaluamos "Season Finale" al terminar el último GP disponible de una season.
+            # Si luego hay más carreras, se recalculará.
+            print(f"   🏆 Cerrando Temporada {gp.season_id}...")
+            evaluate_season_finale_achievements(db, gp.season_id)
+
+    print("✅ RECONSTRUCCIÓN COMPLETADA.")
